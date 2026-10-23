@@ -1,67 +1,73 @@
-# Template de démonstration
+# Automate Pulse Hub v2
 
-Ceci est la documentation utilisateur de l'intégration. Gladys ré-héberge ce
-fichier et affiche un lien **Documentation** permanent vers lui dans l'écran
-de configuration (dans la langue de l'utilisateur, avec l'anglais en repli) —
-c'est au moment de configurer que l'utilisateur en a le plus besoin. Gardez
-les courtes indications d'accueil dans les blocs `section` du `config_schema`
-du manifest ; mettez ici le pas-à-pas détaillé (captures d'écran, dépannage…).
+Cette intégration amène dans Gladys les stores **Rollease Acmeda Automate**
+appairés à un **Pulse Hub v2**. Chaque store devient un **volet** de l'onglet
+Découverte : ouverture, fermeture, arrêt, sa position, et le niveau de batterie
+des moteurs sur batterie. Tout reste sur votre réseau local ; le cloud de
+Rollease Acmeda n'est pas utilisé. Non officiel, sans lien avec Rollease Acmeda.
 
-## Ce que vous obtenez
+> **Version de développement.** Cette intégration n'a **jamais été testée avec
+> un vrai hub** : seulement avec un hub simulé. Le protocole local du hub n'est
+> pas documenté par Rollease Acmeda ; il vient de la bibliothèque aiopulse2
+> (l'intégration Home Assistant). Vos retours sont bienvenus dans les
+> [issues GitHub](https://github.com/LM1LC3N7/gladys-automate-pulse/issues).
 
-Six appareils de démonstration apparaissent après l'installation : une
-station météo (vraies données Open-Meteo), un interrupteur, une lampe
-variable, une prise connectée avec mesure de puissance, un détecteur de
-mouvement et une caméra.
+## Avant de commencer
+
+1. Installez le hub et ses stores dans l'application **Automate Pulse 2**, et
+   nommez-y les stores : Gladys reprend leurs noms depuis le hub.
+2. Donnez au hub une adresse IP fixe dans votre box (réservation DHCP).
+3. Le Pulse Hub **v1** n'est pas pris en charge (autre protocole).
 
 ## Configuration
 
-1. Ouvrez l'onglet **Configuration** de l'intégration.
-2. Renseignez la **latitude** et la **longitude** que la station météo de
-   démonstration doit observer (Paris par défaut), et choisissez votre unité
-   de température. L'**intervalle de rafraîchissement** règle la fréquence
-   de lecture de la station météo et de la puissance de la prise : toutes
-   les 5 minutes par défaut, toutes les minutes au plus.
-3. Enregistrez : les appareils apparaissent dans l'onglet **Découverte**,
-   prêts à être ajoutés.
+- **Adresse du hub** : son adresse IP, par exemple `192.168.1.50`.
+- **Empreinte du certificat** (facultatif) : le hub utilise un certificat TLS
+  auto-signé. Vide, le certificat rencontré à la première connexion est gardé ;
+  si un autre apparaît plus tard (nouveau hub, réinitialisation, ou autre
+  machine à cette adresse), tout s'arrête et le statut affiche son empreinte
+  SHA-256. Si c'est votre hub, appuyez deux fois sur **Faire confiance au
+  nouveau certificat** (dans les 60 s), ou saisissez cette empreinte dans ce
+  champ.
+- **Intervalle de lecture** : fréquence à laquelle l'état des stores est
+  demandé (10 s par défaut, de 5 à 300 s). Après une commande, le store est
+  aussi lu à 1,5, 4, 10, 25 et 50 s.
+- **Langue des noms des fonctionnalités**.
 
-Le réglage **Préférer la connexion locale** pilote la prise de
-démonstration : elle affiche en badge le canal réellement utilisé (local ou
-cloud), avec un point orange quand elle fonctionne en mode dégradé (local
-refusé, bascule cloud).
+Ouvrez ensuite l'onglet **Découverte** et ajoutez les stores.
 
-## Actions
+## Ce que vous obtenez
 
-- **Tester le fournisseur météo** — effectue une requête en direct vers
-  Open-Meteo et affiche la température et l'humidité actuelles sous le
-  bouton.
-- **Identifier un appareil** — choisissez un de vos appareils dans la liste
-  et il se signale (la lampe de démonstration « clignote » dans les logs).
+| Fonctionnalité        | Gladys          | Remarques                                                                        |
+| --------------------- | --------------- | -------------------------------------------------------------------------------- |
+| Ouverture / fermeture | volet, état     | ouvrir, fermer, arrêter                                                          |
+| Position              | volet, position | 0 fermé .. 100 ouvert                                                            |
+| Batterie              | batterie, %     | moteurs sur batterie seulement, estimée d'après la tension (comme l'application) |
 
-## Scènes
+Un store n'est jamais un interrupteur : un « éteins tout » ne le fait jamais
+bouger.
 
-L'intégration ajoute ses propres cartes à l'éditeur de scènes (Gladys 5.1
-ou plus récent), dans la catégorie **Intégrations** :
+## Comportement des commandes
 
-- **Mouvement détecté** (déclencheur) — lance la scène quand un détecteur
-  de démonstration voit bouger quelque chose. Choisissez éventuellement le
-  détecteur et ce qui a bougé (personne, animal) ; laissés vides, toute
-  détection correspond. Les actions suivantes peuvent lire ce qui a bougé
-  avec `{{triggerEvent.data.target}}`.
-- **Identifier un appareil** (action) — fait se signaler l'appareil choisi.
-  Elle indique si l'appareil a pu se signaler, pour que les actions
-  suivantes puissent en dépendre.
+- Un mouvement part dans les 3,5 s qui suivent votre clic, sinon il est refusé
+  (rien n'est envoyé). Il est « accepté » dès que le hub indique que le store
+  bouge ou y est déjà ; si le hub ne le dit pas à temps, Gladys affiche
+  **« envoyée, sans confirmation »** et relit le store. La position n'est
+  confirmée que quand le hub la donne ; une position non atteinte à la fin
+  s'affiche sur le badge.
+- **Arrêt** n'attend jamais : il part tout de suite, même quand le hub a
+  demandé d'attendre (un seul essai), et annule un mouvement pas encore envoyé.
+- La batterie et le type de moteur viennent rarement du hub : ils sont demandés
+  au plus une fois par heure et par store, la batterie peut donc apparaître un
+  peu plus tard.
 
-## Tableau de bord
+## Limites
 
-Ajoutez le widget **État de la démo** à un tableau de bord : il affiche en
-direct la température de la station météo et la puissance de la prise du
-bureau, la connexion utilisée par la prise (en orange si dégradée) et la
-position observée. Son bouton **Identifier la lampe** fait se signaler la
-lampe de démonstration.
-
-## Dépannage
-
-L'intégration journalise tout ce qu'elle fait : consultez les logs de
-l'intégration depuis l'interface Gladys (ou `docker logs` sur l'hôte) avec
-`LOG_LEVEL=debug` pour le détail complet.
+- Un seul hub par intégration dans cette version.
+- Les noms des stores sont lus sur le second port du hub (TCP 1487) ; s'il ne
+  répond pas, un store est nommé d'après son identifiant (« Store ABC »).
+- Un hub qui refuse les connexions (HTTP 429 ou 5xx) est laissé tranquille de
+  1 minute à 6 heures ; les autres échecs sont réessayés après 10 s, 30 s, 1, 2
+  et 5 minutes, jamais plus vite que l'intervalle de lecture, redémarrage
+  compris.
+- Rien n'est secret ici : le hub n'a pas de mot de passe.

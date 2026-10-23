@@ -1,61 +1,68 @@
-# Demo Devices Template
+# Automate Pulse Hub v2
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+This integration brings the **Rollease Acmeda Automate** shades paired with a
+**Pulse Hub v2** into Gladys. Each shade becomes a **shutter** of the Discovery
+tab: open, close, stop, its position, and the battery level of battery motors.
+Everything stays on your local network; the cloud of Rollease Acmeda is not
+used. Unofficial, not affiliated with Rollease Acmeda.
 
-## What you get
+> **Development version.** This integration has **never been tested with a
+> real hub**: only with a simulated hub. The local protocol of the hub is not
+> documented by Rollease Acmeda; it comes from the aiopulse2 library (the
+> Home Assistant integration). Feedback is welcome in the
+> [GitHub issues](https://github.com/LM1LC3N7/gladys-automate-pulse/issues).
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+## Before you start
+
+1. Set up the hub and its shades in the **Automate Pulse 2** app, and name the
+   shades there: Gladys takes their names from the hub.
+2. Give the hub a fixed IP address in your router (DHCP reservation).
+3. The Pulse Hub **v1** is not supported (another protocol).
 
 ## Configuration
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+- **Address of the hub**: its IP address, like `192.168.1.50`.
+- **Certificate fingerprint** (optional): the hub uses a self-signed TLS
+  certificate. Empty, the certificate met at the first connection is kept;
+  if another one shows up later (a new hub, a reset, or another machine at
+  this address), everything stops and the status shows its SHA-256
+  fingerprint. If it is your hub, press **Trust the new certificate** twice
+  (within 60 s), or type that fingerprint in this field.
+- **Read interval**: how often the state of the shades is asked (10 s by
+  default, 5 to 300 s). After a command the shade is also read at 1.5, 4, 10,
+  25 and 50 s.
+- **Language of the feature names**.
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+Then open the **Discovery** tab and add the shades.
 
-## Actions
+## What you get
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+| Feature      | Gladys            | Notes                                                          |
+| ------------ | ----------------- | -------------------------------------------------------------- |
+| Open / close | shutter, state    | open, close, stop                                              |
+| Position     | shutter, position | 0 closed .. 100 open                                           |
+| Battery      | battery, %        | battery motors only, an estimate from the voltage (as the app) |
 
-## Scenes
+A shade is never a switch: a "turn everything off" never moves it.
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+## How the commands behave
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+- A move is sent within 3.5 s of your click or refused (nothing sent). It is
+  "accepted" once the hub reports the shade moving or already there; if the
+  hub does not report it in time, Gladys says **"sent, without confirmation"**
+  and reads the shade again. The position is confirmed only when the hub
+  reports it; a position not reached at the end shows on the badge.
+- **Stop** never waits: it goes at once, even while the hub asked to wait (one
+  try), and cancels a move not sent yet.
+- The battery and the motor type come from the hub rarely: they are asked for
+  at most once an hour per shade, so the battery may appear a little later.
 
-## Dashboard
+## Limits
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
-
-## Troubleshooting
-
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+- One hub per integration in this version.
+- The names of the shades are read on the second port of the hub (TCP 1487);
+  if it does not answer, a shade is named after its id ("Shade ABC").
+- A hub that refuses connections (HTTP 429 or 5xx) is left alone 1 minute to
+  6 hours; other failures are retried after 10 s, 30 s, 1, 2 and 5 minutes,
+  never sooner than the read interval, a restart included.
+- Nothing is a secret here: the hub has no password.
