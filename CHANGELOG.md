@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-23
+
 ### Fixed
 
 - A STOP held after a click is no longer written again after a newer move (a
@@ -50,5 +52,6 @@ the notes of the version's GitHub Release.
   `/data`); never connected sooner than the read interval, a restart included.
 - A "Test the connection" button, English and French texts.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/LM1LC3N7/gladys-automate-pulse/releases/tag/v0.1.1

@@ -1,6 +1,6 @@
 {
   "name": "gladys-automate-pulse",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Gladys Assistant external integration for Rollease Acmeda Automate shades through the Pulse Hub v2, on the local network. Unofficial, not affiliated with Rollease Acmeda.",
   "type": "module",
