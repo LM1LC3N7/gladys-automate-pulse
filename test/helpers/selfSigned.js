@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
 // A self-signed X.509 certificate made in plain Node (no openssl): the
 // minimal DER of RFC 5280 (v3, no extension), signed with RSA-SHA256. Like
-// the certificate of an M1XEP, no authority vouches for it.
+// the certificate of a Pulse Hub v2, no authority vouches for it.
 // -----------------------------------------------------------------------------
 
 import { X509Certificate, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
@@ -34,7 +34,7 @@ const name = (cn) => seq(tlv(0x31, seq(oid('2.5.4.3'), tlv(0x0c, Buffer.from(cn)
 const time = (text) => tlv(0x17, Buffer.from(text));
 
 /** { key, cert, fingerprint256 } in PEM, for a TLS server on loopback. */
-export function selfSigned(cn = 'm1xep.lan') {
+export function selfSigned(cn = 'pulse-hub.lan') {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const algorithm = seq(oid('1.2.840.113549.1.1.11'), Buffer.from([0x05, 0x00]));
   const serial = randomBytes(8);

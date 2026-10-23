@@ -19,7 +19,29 @@ import {
   reportOf,
   stopPayload,
   voltageOf,
+  closedOf,
+  provenOther,
 } from '../src/pulse/protocol.js';
+
+test('a position: a number or digits only; blank is unknown, never 0 (review I3)', () => {
+  assert.equal(closedOf(''), undefined);
+  assert.equal(closedOf(' '), undefined);
+  assert.equal(closedOf(null), undefined);
+  assert.equal(closedOf('40'), 40);
+  assert.equal(closedOf(40.4), 40);
+  assert.equal(closedOf('4e1'), undefined);
+  assert.equal(closedOf(101), undefined);
+});
+
+test('another hub only on facts of the same nature that differ (review B1)', () => {
+  const known = { mac: 'aabbcc001122', hubId: 'h1' };
+  assert.equal(provenOther(known, { hubId: 'h1' }), false);
+  assert.equal(provenOther(known, {}), false);
+  assert.equal(provenOther(known, { mac: 'aabbcc001122', hubId: 'zz' }), false, 'the MAC rules');
+  assert.equal(provenOther(known, { mac: '112233445566' }), true);
+  assert.equal(provenOther(known, { hubId: 'h2' }), true);
+  assert.equal(provenOther({ mac: 'aabbcc001122' }, { hubId: 'h2' }), false);
+});
 import { normalizeMemory } from '../src/store.js';
 
 test('the payloads of aiopulse2', () => {

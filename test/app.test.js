@@ -6,6 +6,7 @@
 // -----------------------------------------------------------------------------
 
 import { test } from 'node:test';
+import { createServer as createNetServer } from 'node:net';
 import assert from 'node:assert/strict';
 import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
 import { PulseApp } from '../src/app.js';
@@ -13,6 +14,7 @@ import { normalizeFingerprint } from '../src/config.js';
 import { TIMINGS } from '../src/constants.js';
 import { registerHandlers } from '../src/handlers.js';
 import { fetchNames } from '../src/pulse/serial.js';
+import { openHubSocket } from '../src/pulse/ws.js';
 import { memoryStore } from '../src/store.js';
 import { HUB_ID, startHub } from './helpers/fakeHub.js';
 
@@ -56,6 +58,7 @@ async function setup(
       (...args) => logs.push(`${level} ${args.map((a) => a?.message ?? a).join(' ')}`),
     ]),
   );
+  const pins = [];
   const timeouts = [];
   const timers = {
     setTimeout: (fn, ms) => {
@@ -78,6 +81,11 @@ async function setup(
     serialPort: hub.serialPort,
     // The real serial exchange, with a short silence before it ends.
     fetchNames: (options) => fetchNames({ ...options, idle: 50 }),
+    // The real client; the pin of each connection is recorded.
+    openSocket: (options) => {
+      pins.push(options.pin);
+      return openHubSocket(options);
+    },
   });
   registerHandlers(gladys, app, logger);
   await gladys.connect();
@@ -96,7 +104,7 @@ async function setup(
       timer.fn();
     }
   };
-  return { gladys, app, hub, logs, store, clock, timeouts, fire };
+  return { gladys, app, hub, logs, store, clock, timeouts, fire, pins };
 }
 
 async function createAll(gladys) {
@@ -168,6 +176,10 @@ test('a move is written within the deadline, accepted once the hub reports it mo
   await until(() => !app.targets.has('ABC'));
   await press(gladys, 'ABC', 'state', 1);
   assert.deepEqual(orders(hub).at(-1), { ABC: { movePercent: 0 } });
+  // Still again before the next order (a moving shade proves nothing by moving).
+  hub.shades.ABC.is = true;
+  app.ask(app.session.epoch);
+  await until(() => !app.shades.get('ABC').moving);
   await press(gladys, 'ABC', 'state', -1);
   assert.deepEqual(orders(hub).at(-1), { ABC: { movePercent: 100 } });
   assert.equal(hub.connections, 1);
@@ -213,17 +225,19 @@ test('STOP cancels a move waiting for the first report of a session', async (t) 
   // A restart: the hub answers nothing at first.
   const hub = first.hub;
   hub.mode = 'silent';
-  const { gladys, app } = await setup(t, { hub, store, devices, connect: false });
+  const { gladys, app, clock } = await setup(t, { hub, store, devices, connect: false });
   await app.connect();
   assert.ok(app.session && !app.session.identity);
   const move = press(gladys, 'ABC', 'position', 50);
   await new Promise((resolve) => setTimeout(resolve, 20));
   const stop = press(gladys, 'ABC', 'state', 0);
-  await assert.rejects(move, /stop|arrêt/i);
+  await assert.rejects(move, /stop|arrÃªt/i);
   // The STOP left before any report (the hub of the device is the one kept in /data).
   await until(() => orders(hub).some((o) => o.ABC?.stopShade));
   assert.ok(!orders(hub).some((o) => o.ABC?.movePercent === 50), 'the move never left');
   hub.mode = 'normal';
+  // The requests left unanswered: a new one only a second later (one at a time).
+  clock.advance(TIMINGS.askGap);
   app.ask(app.session.epoch);
   await stop;
 });
@@ -237,8 +251,8 @@ test('another certificate: final stop, nothing written, lifted by two presses', 
   assert.deepEqual(store.data.certChanged, { fingerprint });
   assert.equal(hub.sockets.size, 0);
   assert.deepEqual(hub.received, []);
+  await until(() => status(gladys)?.message.en.includes(fingerprint));
   assert.equal(status(gladys).connected, false);
-  assert.ok(status(gladys).message.en.includes(fingerprint));
   assert.equal(timeouts.length, pending, 'never tried again by itself');
   // A configuration saved unchanged lifts nothing.
   await gladys.fake.configUpdated({ hub_address: `127.0.0.1:${hub.port}` });
@@ -276,14 +290,20 @@ test('429 on the upgrade: a pause kept in /data; STOP still makes one try', asyn
   clock.advance(10 * 60_000);
   await app.connect();
   assert.equal(store.data.pause.until, clock.now() + 600_000);
-  assert.match(gladys.fake.connectionStatus.message.en, /asked to wait/);
+  await until(() => /asked to wait/.test(gladys.fake.connectionStatus?.message.en));
   const before = hub.connections;
   assert.equal(await app.testConnection().then(() => hub.connections), before, 'no try');
-  await assert.rejects(press(gladys, 'ABC', 'state', 0), /not connected|pas connecté/);
+  await assert.rejects(press(gladys, 'ABC', 'state', 0), /not connected|pas connectÃ©/);
   assert.equal(hub.connections, before + 1, 'exactly one try for the STOP');
+  // Another click right after: no new connection within 5 s (review m8).
+  await assert.rejects(press(gladys, 'ABC', 'state', 0), /not connected|pas connectÃ©/);
+  assert.equal(hub.connections, before + 1);
+  clock.advance(TIMINGS.stopConnectEvery);
+  await assert.rejects(press(gladys, 'ABC', 'state', 0), /not connected|pas connectÃ©/);
+  assert.equal(hub.connections, before + 2);
   hub.mode = 'normal';
-  await assert.rejects(press(gladys, 'ABC', 'position', 10), /not connected|pas connecté/);
-  assert.equal(hub.connections, before + 1, 'a move never connects');
+  await assert.rejects(press(gladys, 'ABC', 'position', 10), /not connected|pas connectÃ©/);
+  assert.equal(hub.connections, before + 2, 'a move never connects');
 });
 
 test('a reconnection to Gladys connects to nothing and republishes the status', async (t) => {
@@ -361,4 +381,280 @@ test('a silent hub is dropped and tried again later, never sooner than the backo
   await until(() => app.timer);
   assert.ok(timeouts.includes(app.timer));
   assert.ok(app.timer.ms >= 10_000, `retry in ${app.timer.ms} ms`);
+});
+
+// --- Review 1 ------------------------------------------------------------------
+
+const asks = (hub) => hub.received.filter((x) => x.includes('"src":"app"')).length;
+
+/** Makes a shade of the simulated hub deaf: orders are received but change nothing. */
+function deaf(shade, values) {
+  const state = { ...values };
+  for (const key of ['is', 'mp', 'target']) {
+    Object.defineProperty(shade, key, {
+      enumerable: key !== 'target',
+      configurable: true,
+      get: () => state[key],
+      set: (v) => {
+        if (!state.deaf) state[key] = v;
+      },
+    });
+  }
+  return state;
+}
+
+test('B1: a report without the MAC is not another hub: STOP written, one identity, /data untouched', async (t) => {
+  const { gladys, app, hub, store } = await setup(t);
+  await createAll(gladys);
+  hub.shades.ABC.is = false;
+  hub.mac = undefined; // the hubId is still there
+  const saves = store.saves;
+  app.ask(app.session.epoch);
+  await until(() => app.shades.get('ABC').moving);
+  assert.equal(app.session.identity, HUB_ID);
+  await press(gladys, 'ABC', 'state', 0);
+  assert.ok(orders(hub).some((o) => o.ABC?.stopShade));
+  assert.equal(store.data.hub, HUB_ID);
+  assert.equal(store.saves, saves, '/data not written again');
+  assert.ok(!gladys.fake.discoveredDevices.some((d) => d.external_id.includes(':shade:id-')));
+});
+
+test('B1: reports flipping mac/hubId write /data at most once', async (t) => {
+  const { app, hub, store } = await setup(t);
+  const saves = store.saves;
+  const base = hub.reported().result.reported;
+  for (let i = 0; i < 200; i += 1) {
+    const r = structuredClone(base);
+    if (i % 2) delete r.mac;
+    hub.broadcast(JSON.stringify({ result: { reported: r } }));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.ok(store.saves - saves <= 1, `${store.saves - saves} saves`);
+  assert.equal(app.session.identity, HUB_ID);
+});
+
+test('B1: after a restart, a first report without the MAC keeps the identity kept in /data', async (t) => {
+  const store = memoryStore();
+  const first = await setup(t, { store });
+  await createAll(first.gladys);
+  const devices = first.gladys.fake.devices;
+  await first.app.stop();
+  const hub = first.hub;
+  hub.mac = undefined;
+  const { gladys, app } = await setup(t, { hub, store, devices });
+  assert.equal(app.session.identity, HUB_ID);
+  assert.equal(store.data.hub, HUB_ID);
+  assert.ok(gladys.fake.discoveredDevices.every((d) => d.external_id.includes(HUB_ID)));
+});
+
+test('B1: a report without any identity does not lift the check; a different MAC is another hub', async (t) => {
+  const store = memoryStore();
+  const first = await setup(t, { store });
+  await createAll(first.gladys);
+  const devices = first.gladys.fake.devices;
+  await first.app.stop();
+  const hub = first.hub;
+  const reported = hub.reported;
+  hub.reported = () => {
+    const r = reported();
+    delete r.result.reported.mac;
+    delete r.result.reported.hubId;
+    return r;
+  };
+  const { gladys, app } = await setup(t, { hub, store, devices, connect: false });
+  await app.connect();
+  await until(() => app.session?.noIdentity);
+  assert.equal(app.session.identity, undefined, 'the check is not lifted');
+  // The STOP goes anyway (the hub kept in /data).
+  hub.reported = reported;
+  hub.mac = '11:22:33:44:55:66';
+  const stop = press(gladys, 'ABC', 'state', 0);
+  await until(() => orders(hub).some((o) => o.ABC?.stopShade));
+  await stop.catch(() => {});
+  await until(() => app.session.identity === '112233445566');
+  await assert.rejects(press(gladys, 'ABC', 'state', 0), /Another hub/);
+});
+
+test('I1: a shade already moving proves nothing: "sent, without confirmation"', async (t) => {
+  const { gladys, app, hub, fire } = await setup(t);
+  await createAll(gladys);
+  const s = deaf(hub.shades.ABC, { is: false, mp: 60 });
+  s.deaf = true;
+  // The app has seen it moving (closing, from the remote) before the order.
+  app.ask(app.session.epoch);
+  await until(() => app.shades.get('ABC').moving);
+  const pending = press(gladys, 'ABC', 'position', 100);
+  await until(() => orders(hub).length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  fire(TIMINGS.commandAnswerBy);
+  await assert.rejects(pending, /without confirmation/);
+});
+
+test('I2: a STOP lost with its connection is written again on the next session', async (t) => {
+  const { gladys, hub, fire, timeouts } = await setup(t);
+  await createAll(gladys);
+  const s = deaf(hub.shades.ABC, { is: false, mp: 40 });
+  const push = hub.received.push.bind(hub.received);
+  hub.received.push = (text) => {
+    if (text.includes('stopShade') && !s.dropped) {
+      s.deaf = true;
+      s.dropped = true;
+      setImmediate(() => hub.dropAll());
+    }
+    return push(text);
+  };
+  const pending = press(gladys, 'ABC', 'state', 0);
+  await until(() => timeouts.some((x) => x.ms === TIMINGS.commandAnswerBy && !x.cleared));
+  fire(TIMINGS.commandAnswerBy);
+  await assert.rejects(pending, /without confirmation/);
+  s.deaf = false;
+  // Reopened at once (one try, outside the backoff), the STOP written first.
+  await until(() => orders(hub).filter((o) => o.ABC?.stopShade).length >= 2);
+  assert.equal(hub.connections, 2);
+});
+
+test('I3: an empty or blank position is unknown, never "open"', async (t) => {
+  const { gladys, app, hub } = await setup(t);
+  await createAll(gladys);
+  hub.shades.ABC.mp = '';
+  app.ask(app.session.epoch);
+  await until(() => app.shades.get('ABC').closed === undefined);
+  await app.flush();
+  const positions = gladys.fake.states.filter(
+    (x) => x.device_feature_external_id === id('ABC', 'position'),
+  );
+  assert.ok(positions.every((x) => x.state === 0));
+});
+
+test('I4: a scene moving 20 shades asks the hub a handful of times, not 20 per step', async (t) => {
+  const shades = {};
+  const names = {};
+  for (let i = 0; i < 20; i += 1) {
+    const sid = `S${String(i).padStart(2, '0')}`;
+    shades[sid] = { mp: 100, is: true, ol: true, vo: '12.1D07' };
+    names[sid] = `Shade ${i}`;
+  }
+  const hub = await startHub({ shades, names });
+  const { gladys, fire } = await setup(t, { hub });
+  await until(() => gladys.fake.discoveredDevices.length === 20);
+  await createAll(gladys);
+  const before = asks(hub);
+  await Promise.all(Object.keys(shades).map((sid) => press(gladys, sid, 'position', 100)));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const atOnce = asks(hub) - before;
+  assert.ok(atOnce <= 3, `${atOnce} requests for 20 moves`);
+  fire(1500);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(asks(hub) - before - atOnce <= 1, 'one request for the follow-up step');
+});
+
+test('I5: a typed fingerprint, once verified, is kept: emptying the field never relearns', async (t) => {
+  const store = memoryStore();
+  const hub = await startHub();
+  const fp = normalizeFingerprint(hub.cert.fingerprint256);
+  const { app, pins, clock } = await setup(t, {
+    hub,
+    store,
+    config: { certificate_fingerprint: fp },
+  });
+  assert.equal(pins.at(-1), fp);
+  assert.equal(store.data.pin, fp);
+  await app.configUpdated({ hub_address: `127.0.0.1:${hub.port}`, certificate_fingerprint: '' });
+  clock.advance(60_000);
+  await app.connect();
+  assert.equal(pins.at(-1), fp, 'the next connection checks the same pin');
+});
+
+test('m7: a wrong typed fingerprint, then the field emptied: back to the pinned one without trust', async (t) => {
+  const store = memoryStore();
+  const first = await setup(t, { store });
+  await first.app.stop();
+  const hub = first.hub;
+  const { app } = await setup(t, {
+    hub,
+    store,
+    config: { certificate_fingerprint: 'CD'.repeat(32) },
+    connect: false,
+  });
+  await app.connect();
+  assert.ok(store.data.certChanged);
+  await app.configUpdated({ hub_address: `127.0.0.1:${hub.port}`, certificate_fingerprint: '' });
+  assert.equal(store.data.certChanged, null);
+  assert.equal(await app.connect(), true);
+});
+
+test('m1: a STOP behind a slow connection answers within its own deadline', async (t) => {
+  const sockets = new Set();
+  const black = createNetServer((s) => sockets.add(s));
+  await new Promise((resolve) => black.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    for (const s of sockets) s.destroy();
+    black.close();
+  });
+  const hub = await startHub();
+  const store = memoryStore({ hub: HUB_ID, pin: normalizeFingerprint(hub.cert.fingerprint256) });
+  const devices = [
+    {
+      name: 'Salon',
+      external_id: id('ABC'),
+      features: [
+        { external_id: id('ABC', 'state'), category: 'shutter', type: 'state', read_only: false },
+      ],
+    },
+  ];
+  const { gladys, app } = await setup(t, {
+    hub,
+    store,
+    devices,
+    connect: false,
+    config: { hub_address: `127.0.0.1:${black.address().port}` },
+  });
+  const scheduled = app.connect();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const started = Date.now();
+  const ack = await gladys.fake.setValue(devices[0], devices[0].features[0], 0);
+  const took = Date.now() - started;
+  assert.equal(ack.success, false);
+  assert.ok(took < 4000, `took ${took} ms`);
+  await scheduled;
+});
+
+test('m2: a move written just before a STOP keeps no target', async (t) => {
+  const { gladys, app, hub, fire } = await setup(t);
+  await createAll(gladys);
+  const move = press(gladys, 'ABC', 'position', 50).catch(() => {});
+  const stop = press(gladys, 'ABC', 'state', 0).catch(() => {});
+  await until(() => orders(hub).length === 2);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  fire(TIMINGS.commandAnswerBy);
+  await Promise.all([move, stop]);
+  assert.deepEqual(
+    orders(hub).map((o) => Object.keys(o.ABC)[0]),
+    ['movePercent', 'stopShade'],
+  );
+  assert.equal(app.targets.has('ABC'), false);
+});
+
+test('I2: a STOP is written again while the next reports show the shade moving, bounded', async (t) => {
+  const { gladys, app, hub, clock, fire, timeouts } = await setup(t);
+  await createAll(gladys);
+  const s = deaf(hub.shades.ABC, { is: false, mp: 40 });
+  s.deaf = true;
+  const pending = press(gladys, 'ABC', 'state', 0);
+  await until(() => timeouts.some((x) => x.ms === TIMINGS.commandAnswerBy && !x.cleared));
+  for (let i = 0; i < 6; i += 1) {
+    clock.advance(TIMINGS.askGap);
+    app.ask(app.session.epoch);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  fire(TIMINGS.commandAnswerBy);
+  await assert.rejects(pending, /without confirmation/);
+  const stops = orders(hub).filter((o) => o.ABC?.stopShade).length;
+  assert.equal(stops, 1 + TIMINGS.stopReaffirmMax);
+  // Still at last: the hold is lifted.
+  s.deaf = false;
+  hub.shades.ABC.is = true;
+  clock.advance(TIMINGS.askGap);
+  app.ask(app.session.epoch);
+  await until(() => !app.stopHolds.has('ABC'));
 });

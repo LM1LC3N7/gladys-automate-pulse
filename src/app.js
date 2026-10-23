@@ -6,25 +6,39 @@
 // (open, close, stop, position). index.js only wires the SDK handlers to it.
 //
 // Connection: the certificate of the hub is self-signed, so it is pinned
-// (learned at the first connection, or typed); another one is a final stop
-// kept in /data, lifted only by the user. Never connected sooner than the
-// interval after the last try (the Test button, a reconnection to Gladys, a
-// configuration saved unchanged, a restart: the time of the last try is kept
-// in /data); failures wait 10 s, 30 s, 1, 2, 5 min; a 429 or 5xx to the
-// upgrade pauses 1 min to 6 h, kept in /data. A reconnection to Gladys clears
-// nothing and reads nothing.
+// (learned at the first connection, or typed: either way kept in /data once
+// verified); another one is a final stop kept in /data, lifted only by the
+// user. Never connected sooner than the interval after the last try (the Test
+// button, a reconnection to Gladys, a configuration saved unchanged, a
+// restart: the time of the last try is kept in /data); failures wait 10 s,
+// 30 s, 1, 2, 5 min; a 429 or 5xx to the upgrade pauses 1 min to 6 h, kept in
+// /data. A reconnection to Gladys clears nothing and reads nothing.
+//
+// Identity: the hub identity (frozen, it fixes the external ids) is set at
+// the first report and never downgraded; the facts read (MAC, hubId) are
+// merged while nothing contradicts them. Only a fact of the same nature that
+// differs proves another hub; a missing or unreadable one proves nothing.
+//
+// Reads: ONE state request of the hub at a time (it covers every shade), at
+// most one per second; after commands, one schedule of follow-up reads for
+// the whole hub, set on the last order.
 //
 // Commands:
 //   - a move (open, close, position) is decided on the hub's own report in
-//     this session: the hub identity (MAC) of the device, the shade present;
-//     written within 3.5 s of the click or refused unsent; "accepted" once the
-//     hub reports the shade moving or at the position asked (by 4.3 s), else
+//     this session: the hub identity of the device, the shade present;
+//     written within 3.5 s of the click or refused unsent; "accepted" only
+//     when a later report shows a change the order caused (a still shade now
+//     moving, a position closer to the one asked, or that position), else
 //     "sent, without confirmation"; never retried. The position is confirmed
 //     only by a report equal to it;
-//   - STOP never waits for anything but the connection: no queue, no report
-//     needed (the identity of the hub behind the pinned certificate is kept in
-//     /data), through a pause (one connection try), and cancels every move of
-//     that shade not written yet;
+//   - STOP never waits for a queue or a pause: written at once on the open
+//     session; without one, it opens one (one try, at most every 5 s, within
+//     its own deadline). It needs no report (the identity of the hub behind
+//     the pinned certificate is kept in /data), cancels every move of that
+//     shade not written yet, and is held for a minute: written again while
+//     the next reports show the shade moving, first on the next session, and
+//     a session lost meanwhile is reopened at once (one try). A newer move
+//     really written lifts the hold;
 //   - the ack never waits for a publication to Gladys.
 // A report of an older session or configuration publishes nothing (epoch and
 // generation checked).
@@ -44,6 +58,7 @@ import {
   movePayload,
   parseMessage,
   positionOf,
+  provenOther,
   queryPayload,
   reportOf,
   stopPayload,
@@ -67,6 +82,15 @@ const KEPT_FIELDS = [
 
 const COMMAND_KEYS = new Set([FEATURES.STATE, FEATURES.POSITION]);
 const PAUSE_KINDS = new Set(['rate', 'server']);
+
+/** A real-time wait (a command deadline is real time, whatever the clock of the app). */
+const realSleep = (ms) => {
+  let handle;
+  const promise = new Promise((resolve) => {
+    handle = setTimeout(resolve, Math.max(0, ms));
+  });
+  return { promise, cancel: () => clearTimeout(handle) };
+};
 
 export class PulseApp {
   constructor({
@@ -93,10 +117,12 @@ export class PulseApp {
     this.memory = undefined;
     this.generation = 0;
     this.started = false;
-    /** The open session: { conn, epoch, openedAt, lastReportAt, identity } */
+    /** The open session: { conn, epoch, openedAt, lastReportAt, identity, noIdentity } */
     this.session = undefined;
     this.epoch = 0;
     this.connecting = undefined;
+    /** Messages received before the session of their epoch was set. */
+    this.early = [];
     /** When the hub was last connected to by this process (exact). */
     this.lastAttemptAt = -Infinity;
     this.nextAttemptAt = -Infinity;
@@ -104,18 +130,30 @@ export class PulseApp {
     this.lastError = undefined;
     this.timer = undefined;
     this.readTimer = undefined;
-    /** The last report of the hub in this session: { name, model, firmware }. */
+    /** The state request: when it left, whether a report came since, one waiting. */
+    this.lastAskAt = -Infinity;
+    this.askAnswered = true;
+    this.askPending = false;
+    this.askTimer = undefined;
+    /** The last report of the hub: { name, model, firmware }. */
     this.hubInfo = undefined;
-    /** shade id -> { id, name, nameTries, type, voltage, closed, moving, online, readAt, detailsAskedAt } */
+    /** shade id -> { id, name, nameTries, type, voltage, closed, moving, online, readAt, readSeq, detailsAskedAt } */
     this.shades = new Map();
     this.names = new Map();
     this.namesAt = -Infinity;
     this.namesRunning = false;
+    /** Reports numbered: a command is judged only on the reports after its write. */
     this.reportSeq = 0;
+    /** Orders numbered as they are written; shade id -> number of its last STOP written. */
+    this.writeSeq = 0;
+    this.lastStopWrite = new Map();
+    /** shade id -> { until, count, seq }: a STOP to write again while the shade moves. */
+    this.stopHolds = new Map();
+    this.stopConnectAt = -Infinity;
     /** Promises waiting for a report or a connection: { check, resolve } */
     this.waiters = new Set();
-    /** shade id -> follow-up timers */
-    this.followUps = new Map();
+    /** The follow-up reads of the hub after the last order. */
+    this.followHandles = new Set();
     /** shade id -> the percent closed asked by the last move accepted */
     this.targets = new Map();
     /** shade id -> the position read when the last move did not reach its target */
@@ -126,6 +164,8 @@ export class PulseApp {
     this.tickets = new Map();
     /** device external id -> device published in this run (a publication never shrinks) */
     this.known = new Map();
+    this.discoveryTimes = [];
+    this.discoveryTimer = undefined;
     this.lastStatus = undefined;
     this.published = undefined;
     this.badges = undefined;
@@ -160,6 +200,12 @@ export class PulseApp {
       this.memory.pin = changed.fingerprint;
       await this.saveMemory();
       this.logger.info(`Certificate ${changed.fingerprint} typed by the user: pinned`);
+    } else if (changed && !this.config.pin && changed.fingerprint === this.memory.pin) {
+      // A wrong fingerprint was typed, then the field emptied: the certificate
+      // met is the one already pinned (review m7).
+      this.memory.certChanged = null;
+      await this.saveMemory();
+      this.logger.info('Back to the pinned certificate');
     }
     if (generation !== this.generation) {
       return;
@@ -182,12 +228,11 @@ export class PulseApp {
     this.generation += 1;
     this.clearTimer();
     this.closeSession();
-    for (const handles of this.followUps.values()) {
-      for (const handle of handles) {
-        this.timers.clearTimeout(handle);
-      }
+    this.clearFollowUps();
+    if (this.discoveryTimer) {
+      this.timers.clearTimeout(this.discoveryTimer);
+      this.discoveryTimer = undefined;
     }
-    this.followUps.clear();
     for (const waiter of this.waiters) {
       waiter.resolve(false);
     }
@@ -207,12 +252,29 @@ export class PulseApp {
     }
   }
 
-  /** Closes the session (if any) without counting it as a failure. */
-  closeSession() {
+  clearFollowUps() {
+    for (const handle of this.followHandles) {
+      this.timers.clearTimeout(handle);
+    }
+    this.followHandles.clear();
+  }
+
+  clearSessionTimers() {
     if (this.readTimer) {
       this.timers.clearTimeout(this.readTimer);
       this.readTimer = undefined;
     }
+    if (this.askTimer) {
+      this.timers.clearTimeout(this.askTimer);
+      this.askTimer = undefined;
+    }
+    this.askPending = false;
+    this.askAnswered = true;
+  }
+
+  /** Closes the session (if any) without counting it as a failure. */
+  closeSession() {
+    this.clearSessionTimers();
     const session = this.session;
     this.session = undefined;
     this.epoch += 1;
@@ -257,7 +319,7 @@ export class PulseApp {
     } else if (previous.language !== next.language) {
       this.published = undefined;
     }
-    await this.publishAll({ states: republish });
+    await this.publishAll({ states: republish, force: republish });
   }
 
   async saveMemory() {
@@ -354,6 +416,7 @@ export class PulseApp {
     }
     const pin = this.pin();
     const epoch = ++this.epoch;
+    this.early = [];
     let opened;
     try {
       opened = await this.openSocket({
@@ -372,22 +435,28 @@ export class PulseApp {
       }
       return false;
     }
-    if (generation !== this.generation || epoch !== this.epoch) {
+    if (generation !== this.generation || epoch !== this.epoch || !opened.connection.open) {
       opened.connection.close();
       return false;
     }
     // A connection timer still pending (a STOP or the Test button connected first) is dropped.
     this.clearTimer();
+    this.clearSessionTimers();
     this.session = {
       conn: opened.connection,
       epoch,
       openedAt: this.now(),
       lastReportAt: undefined,
       identity: undefined,
+      noIdentity: false,
     };
     this.lastError = undefined;
+    // The STOPs still held go first on the new session, before any read (review I2).
+    this.reaffirmStops();
     let save = false;
-    if (!pin) {
+    if (this.memory.pin !== opened.fingerprint) {
+      // Verified: learned at first use, or the fingerprint the user typed
+      // (kept too, so that emptying the field never relearns blindly, review I5).
       this.memory.pin = opened.fingerprint;
       save = true;
       this.logger.info(`Certificate of the hub pinned (SHA-256 ${opened.fingerprint})`);
@@ -404,6 +473,10 @@ export class PulseApp {
       return false;
     }
     this.logger.info('Connected to the hub');
+    const early = this.early.splice(0);
+    for (const text of early) {
+      this.onMessage(epoch, text);
+    }
     // The first read of this connection, then one every interval.
     this.ask(epoch);
     this.scheduleRead(epoch);
@@ -438,8 +511,10 @@ export class PulseApp {
       this.nextAttemptAt = this.now() + wait;
       this.logger.warn(`Hub: ${reasonOf(err).en}; next try in ${age(wait)}`);
     }
-    await this.publishAll();
-    this.scheduleConnect();
+    // Never awaited: a STOP waiting on this connection gets its answer at once (review m1).
+    this.publishAll()
+      .catch(() => {})
+      .finally(() => this.scheduleConnect());
   }
 
   /** The session ended (closed by the hub, broken, or silent). */
@@ -448,10 +523,7 @@ export class PulseApp {
       return;
     }
     const lived = this.now() - this.session.openedAt;
-    if (this.readTimer) {
-      this.timers.clearTimeout(this.readTimer);
-      this.readTimer = undefined;
-    }
+    this.clearSessionTimers();
     this.session = undefined;
     this.epoch += 1;
     if (lived >= TIMINGS.stableSession) {
@@ -467,6 +539,12 @@ export class PulseApp {
     this.logger.warn(`Hub: ${reasonOf(this.lastError).en}; next try in ${age(wait)}`);
     this.wake();
     this.badges = undefined;
+    if (this.heldStops() && this.stopConnectAllowed()) {
+      // A STOP may have died with the session: reopened at once, one try,
+      // outside the backoff (review I2).
+      this.stopConnectAt = this.now();
+      this.connect().catch(() => {});
+    }
     this.publishAll()
       .catch(() => {})
       .finally(() => {
@@ -500,12 +578,35 @@ export class PulseApp {
     }, this.interval);
   }
 
-  /** Asks the hub for its shadow (a read). */
+  /**
+   * Asks the hub for its shadow (a read of EVERY shade). One request at a
+   * time: another one within a second of a request not answered yet waits
+   * for its answer (or that second), and the waiting ones are merged
+   * (review I4).
+   */
   ask(epoch) {
     const session = this.session;
-    if (session?.epoch === epoch) {
-      session.conn.send(askShadow(this.now())).catch(() => {});
+    if (session?.epoch !== epoch) {
+      return;
     }
+    const since = this.now() - this.lastAskAt;
+    if (!this.askAnswered && since < TIMINGS.askGap) {
+      this.askPending = true;
+      if (!this.askTimer) {
+        this.askTimer = this.timers.setTimeout(() => {
+          this.askTimer = undefined;
+          if (this.askPending) {
+            this.askAnswered = true;
+            this.ask(epoch);
+          }
+        }, TIMINGS.askGap - since);
+      }
+      return;
+    }
+    this.askPending = false;
+    this.askAnswered = false;
+    this.lastAskAt = this.now();
+    session.conn.send(askShadow(this.now())).catch(() => {});
   }
 
   /**
@@ -531,6 +632,15 @@ export class PulseApp {
 
   onMessage(epoch, text) {
     if (this.session?.epoch !== epoch) {
+      // The same TLS packet as the upgrade: kept until its session is set.
+      if (
+        !this.session &&
+        epoch === this.epoch &&
+        this.connecting &&
+        this.early.length < TIMINGS.earlyMessages
+      ) {
+        this.early.push(text);
+      }
       return;
     }
     const report = reportOf(parseMessage(text));
@@ -539,36 +649,67 @@ export class PulseApp {
       return;
     }
     this.session.lastReportAt = this.now();
-    // Numbered: a command is accepted only by a report received after its write.
     this.reportSeq += 1;
+    this.askAnswered = true;
     this.applyReport(report);
+    if (this.askPending) {
+      this.ask(epoch);
+    }
+  }
+
+  /**
+   * The identity of the hub of a report (review B1): the identity known stays
+   * unless a fact of the same nature differs; facts missing from memory are
+   * merged in (written to /data only when they change). Undefined: the
+   * report proves nothing (no fact at all, and no identity known yet).
+   */
+  identityOf(report) {
+    const m = this.memory;
+    const read = { mac: report.mac, hubId: report.hubId };
+    if (!read.mac && !read.hubId) {
+      return this.session.identity;
+    }
+    if (m.hub && !provenOther({ mac: m.hubMac, hubId: m.hubId }, read)) {
+      const merged = { mac: m.hubMac ?? read.mac ?? null, hubId: m.hubId ?? read.hubId ?? null };
+      if (merged.mac !== m.hubMac || merged.hubId !== m.hubId) {
+        m.hubMac = merged.mac;
+        m.hubId = merged.hubId;
+        this.saveMemory().catch(() => {});
+      }
+      return m.hub;
+    }
+    if (m.hub) {
+      this.logger.warn('Another hub answers at this address now');
+      this.shades.clear();
+      this.targets.clear();
+      this.notReached.clear();
+      this.unconfirmed.clear();
+      this.stopHolds.clear();
+    }
+    m.hub = report.identity;
+    m.hubMac = read.mac ?? null;
+    m.hubId = read.hubId ?? null;
+    this.saveMemory().catch(() => {});
+    return m.hub;
   }
 
   applyReport(report) {
     const session = this.session;
-    if (!report.identity) {
-      session.identity = undefined;
+    const identity = this.identityOf(report);
+    if (!identity) {
+      // Nothing proves which hub this is: the check is not lifted.
       session.noIdentity = true;
       this.wake();
       this.publishAll().catch(() => {});
       return;
     }
     session.noIdentity = false;
-    if (session.identity && session.identity !== report.identity) {
-      this.logger.warn('Another hub answers on this connection now');
-    }
-    if (session.identity !== report.identity) {
-      this.shades.clear();
-    }
-    session.identity = report.identity;
-    if (this.memory.hub !== report.identity) {
-      this.memory.hub = report.identity;
-      this.saveMemory().catch(() => {});
-    }
+    session.identity = identity;
     this.hubInfo = { name: report.name, model: report.model, firmware: report.firmware };
     const now = this.now();
     const next = new Map();
     for (const [id, read] of report.shades) {
+      // Kept across sessions of the same hub (review m3): motor type, names.
       const shade = this.shades.get(id) ?? {
         id,
         name: this.names.get(id),
@@ -579,6 +720,7 @@ export class PulseApp {
         moving: false,
         online: false,
         readAt: undefined,
+        readSeq: 0,
         detailsAskedAt: -Infinity,
       };
       shade.closed = read.closed;
@@ -592,6 +734,7 @@ export class PulseApp {
       }
       next.set(id, shade);
       this.confirm(shade);
+      this.holdStop(shade);
     }
     this.shades = next;
     this.wake();
@@ -618,6 +761,63 @@ export class PulseApp {
       this.unconfirmed.delete(id);
       this.notReached.delete(id);
     }
+  }
+
+  // --- STOP held -------------------------------------------------------------
+
+  /** The STOPs held and not expired. */
+  heldStops() {
+    const now = this.now();
+    for (const [id, hold] of this.stopHolds) {
+      if (now > hold.until) {
+        this.stopHolds.delete(id);
+      }
+    }
+    return this.stopHolds.size > 0;
+  }
+
+  stopConnectAllowed() {
+    return this.now() - this.stopConnectAt >= TIMINGS.stopConnectEvery;
+  }
+
+  /** A report after a STOP: still lifts the hold, moving writes the STOP again (bounded). */
+  holdStop(shade) {
+    const hold = this.stopHolds.get(shade.id);
+    if (!hold || shade.readSeq <= hold.seq) {
+      return;
+    }
+    if (this.now() > hold.until || !shade.moving) {
+      this.stopHolds.delete(shade.id);
+      return;
+    }
+    if (hold.count < TIMINGS.stopReaffirmMax) {
+      this.writeStop(shade.id, hold);
+    }
+  }
+
+  /** On a new session: every STOP held is written first. */
+  reaffirmStops() {
+    if (!this.heldStops()) {
+      return;
+    }
+    for (const [id, hold] of this.stopHolds) {
+      if (hold.count < TIMINGS.stopReaffirmMax) {
+        this.writeStop(id, hold);
+      }
+    }
+  }
+
+  writeStop(id, hold) {
+    const session = this.session;
+    if (!session?.conn.open) {
+      return;
+    }
+    hold.count += 1;
+    hold.seq = this.reportSeq;
+    this.writeSeq += 1;
+    this.lastStopWrite.set(id, this.writeSeq);
+    session.conn.send(stopPayload(id, this.now())).catch(() => {});
+    this.logger.info(`Shade ${id}: stop written again (still moving)`);
   }
 
   /** The names of the shades, read on the serial port (spaced, three tries each). */
@@ -653,10 +853,7 @@ export class PulseApp {
           const name = names.get(shade.id);
           if (name) {
             this.names.set(shade.id, name);
-            const current = this.shades.get(shade.id);
-            if (current) {
-              current.name = name;
-            }
+            shade.name = name;
           }
           shade.nameTries += 1;
         }
@@ -790,9 +987,9 @@ export class PulseApp {
     );
   }
 
-  async publishAll({ states = true } = {}) {
+  async publishAll({ states = true, force = false } = {}) {
     const generation = this.generation;
-    await this.publishDevices();
+    await this.publishDevices({ force });
     if (generation !== this.generation) {
       return;
     }
@@ -814,9 +1011,10 @@ export class PulseApp {
    * The Discovery tab: one device per shade of the hub, once its name was
    * asked. A created device never loses a feature (Gladys would otherwise
    * mark it changed, and "Update" would drop their history), and a device
-   * seen earlier in this run stays.
+   * seen earlier in this run stays. Sent at most 5 times per 10 s (review
+   * m4: a chatty hub never floods Gladys), the rest later in one go.
    */
-  async publishDevices() {
+  async publishDevices({ force = false } = {}) {
     const hub = this.session?.identity;
     if (hub) {
       const created = new Map((this.gladys.devices ?? []).map((d) => [d.external_id, d]));
@@ -854,6 +1052,24 @@ export class PulseApp {
     if (json === this.published) {
       return;
     }
+    const now = this.now();
+    this.discoveryTimes = this.discoveryTimes.filter((t) => now - t < TIMINGS.discoveryWindow);
+    if (!force && this.discoveryTimes.length >= TIMINGS.discoveryBurst) {
+      if (!this.discoveryTimer) {
+        const generation = this.generation;
+        this.discoveryTimer = this.timers.setTimeout(
+          () => {
+            this.discoveryTimer = undefined;
+            if (generation === this.generation) {
+              this.publishDevices().catch(() => {});
+            }
+          },
+          Math.max(SECOND, this.discoveryTimes[0] + TIMINGS.discoveryWindow - now),
+        );
+      }
+      return;
+    }
+    this.discoveryTimes.push(now);
     try {
       await this.gladys.publishDiscoveredDevices(devices);
       this.published = json;
@@ -958,7 +1174,7 @@ export class PulseApp {
   /** The Discovery tab asks for a scan: the shades of the last report, sent again (no read). */
   async scan() {
     this.published = undefined;
-    await this.publishDevices();
+    await this.publishDevices({ force: true });
   }
 
   // --- Configuration buttons -------------------------------------------------
@@ -1119,31 +1335,48 @@ export class PulseApp {
       // The very last check, right before the bytes leave (synchronous with the write).
       check();
       const session = this.session;
-      const sentAt = this.now();
       const seq = this.reportSeq;
-      const written = session.conn.send(movePayload(target.shade, plan.closed, sentAt));
-      const result = await written;
+      const shadeBefore = this.shades.get(target.shade);
+      const before = { moving: shadeBefore.moving, closed: shadeBefore.closed };
+      this.writeSeq += 1;
+      const written = this.writeSeq;
+      const result = await session.conn.send(movePayload(target.shade, plan.closed, this.now()));
       const name = `Shade ${target.shade}: ${100 - plan.closed} % open`;
       if (result === 'closed') {
         this.logger.warn(`${name} NOT sent (connection closed)`);
         throw this.refusal(ERRORS.notSent);
       }
-      this.targets.set(target.shade, plan.closed);
-      this.notReached.delete(target.shade);
-      this.followUp(target.shade);
+      // Really written: a newer move than any STOP held, which it lifts.
+      const stoppedAfter = (this.lastStopWrite.get(target.shade) ?? 0) > written;
+      if (!stoppedAfter) {
+        this.stopHolds.delete(target.shade);
+        this.targets.set(target.shade, plan.closed);
+        this.notReached.delete(target.shade);
+      }
+      this.followUp();
       if (result === 'failed') {
         return this.unconfirmedAfter(target.shade, name);
       }
-      // Accepted once the hub reports the shade moving, or already there.
+      // Accepted only on a change the order caused (review I1): there
+      // already, a still shade now moving, or a position closer to the one
+      // asked. A shade that was moving already proves nothing by moving.
       this.ask(session.epoch);
+      const tolerance = LIMITS.positionTolerance;
       const accepted = await this.waitFor(() => {
         const shade = this.shades.get(target.shade);
-        return Boolean(
-          shade &&
-          shade.readSeq > seq &&
-          (shade.moving ||
-            (shade.closed !== undefined &&
-              Math.abs(shade.closed - plan.closed) <= LIMITS.positionTolerance)),
+        if (!shade || shade.readSeq <= seq || shade.closed === undefined) {
+          return false;
+        }
+        if (Math.abs(shade.closed - plan.closed) <= tolerance) {
+          return true;
+        }
+        if (before.moving === false && shade.moving) {
+          return true;
+        }
+        return (
+          shade.moving &&
+          before.closed !== undefined &&
+          Math.abs(shade.closed - plan.closed) < Math.abs(before.closed - plan.closed) - tolerance
         );
       }, answerBy - this.now());
       if (!accepted) {
@@ -1167,9 +1400,11 @@ export class PulseApp {
 
   /**
    * STOP: no queue, no report needed (the hub behind the pinned certificate
-   * is the one kept in /data), through a pause (one connection try). Every
-   * move of that shade not written yet is cancelled first, even when this
-   * STOP fails.
+   * is the one kept in /data), through a pause. Without a session it opens
+   * one (one try, at most every 5 s), waiting within its own deadline only.
+   * Every move of that shade not written yet is cancelled first, even when
+   * this STOP fails; once written it is held (written again while the shade
+   * is still seen moving).
    */
   async stopNow(target, received) {
     for (const pending of this.tickets.get(target.shade) ?? []) {
@@ -1187,30 +1422,41 @@ export class PulseApp {
       throw this.refusal(ERRORS.notConnected);
     }
     if (!this.session?.conn.open) {
-      // One try, now, whatever the pause or the backoff (the hub is never
-      // asked anything else by it).
-      this.clearTimer();
-      await this.connect({ timeout: sendBy - 200 - this.now() });
+      if (!this.connecting) {
+        if (!this.stopConnectAllowed()) {
+          throw this.refusal(ERRORS.notConnected);
+        }
+        // One try, now, whatever the pause or the backoff.
+        this.stopConnectAt = this.now();
+        this.clearTimer();
+        this.connect({ timeout: sendBy - 200 - this.now() }).catch(() => {});
+      }
+      // Never longer than the STOP's own deadline (review m1).
+      const sleep = realSleep(sendBy - 200 - this.now());
+      await Promise.race([(this.connecting ?? Promise.resolve()).catch(() => {}), sleep.promise]);
+      sleep.cancel();
     }
     const session = this.session;
     if (!session?.conn.open) {
       throw this.refusal(ERRORS.notConnected);
     }
+    // Refused only on a PROVEN other hub (review B1): the session's identity
+    // only changes on proof; before the first report, the one in /data.
     const hub = session.identity ?? this.memory.hub;
     if (hub && hub !== target.hub) {
       throw this.refusal(ERRORS.otherHub);
     }
-    if (this.now() > sendBy) {
-      throw this.refusal(ERRORS.tooSlow);
-    }
     const seq = this.reportSeq;
+    this.writeSeq += 1;
+    this.lastStopWrite.set(target.shade, this.writeSeq);
     const result = await session.conn.send(stopPayload(target.shade, this.now()));
     const name = `Shade ${target.shade}: stop`;
     if (result === 'closed') {
       this.logger.warn(`${name} NOT sent (connection closed)`);
       throw this.refusal(ERRORS.notSent);
     }
-    this.followUp(target.shade);
+    this.stopHolds.set(target.shade, { until: this.now() + TIMINGS.stopHold, count: 0, seq });
+    this.followUp();
     if (result === 'failed') {
       return this.unconfirmedAfter(target.shade, name);
     }
@@ -1227,38 +1473,36 @@ export class PulseApp {
   }
 
   /**
-   * Reads after a command, spaced over the travel of the shade; one series
-   * per shade (a new command replaces it). After the last one, a position
-   * asked and not read is shown on the badge.
+   * Reads after an order: ONE schedule for the whole hub (a report covers
+   * every shade), set again on the last order (review I4). After the last
+   * one, a position asked and not read is shown on the badge.
    */
-  followUp(shadeId) {
+  followUp() {
     const generation = this.generation;
-    for (const handle of this.followUps.get(shadeId) ?? []) {
-      this.timers.clearTimeout(handle);
-    }
-    const handles = new Set();
-    this.followUps.set(shadeId, handles);
+    this.clearFollowUps();
     TIMINGS.followUps.forEach((delay, index) => {
       const last = index === TIMINGS.followUps.length - 1;
       const handle = this.timers.setTimeout(() => {
-        handles.delete(handle);
+        this.followHandles.delete(handle);
         if (generation !== this.generation || !this.session) {
           return;
         }
-        if (last && this.targets.has(shadeId)) {
-          // The travel is over and the position asked was never read.
-          this.targets.delete(shadeId);
-          const shade = this.shades.get(shadeId);
-          if (shade?.closed !== undefined) {
-            this.notReached.set(shadeId, positionOf(shade.closed));
-            this.unconfirmed.delete(shadeId);
+        if (last && this.targets.size > 0) {
+          // The travel is over and the positions asked were never read.
+          for (const id of [...this.targets.keys()]) {
+            this.targets.delete(id);
+            const shade = this.shades.get(id);
+            if (shade?.closed !== undefined) {
+              this.notReached.set(id, positionOf(shade.closed));
+              this.unconfirmed.delete(id);
+            }
           }
           this.badges = undefined;
           this.publishBadges().catch(() => {});
         }
         this.ask(this.session.epoch);
       }, delay);
-      handles.add(handle);
+      this.followHandles.add(handle);
     });
   }
 }

@@ -6,9 +6,69 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { createServer as createTlsServer } from 'node:tls';
 import { normalizeFingerprint } from '../src/config.js';
 import { openHubSocket, parseHead } from '../src/pulse/ws.js';
 import { frame, startHub } from './helpers/fakeHub.js';
+import { selfSigned } from './helpers/selfSigned.js';
+
+test('frames right behind the upgrade, in separate close packets, are read in order', async (t) => {
+  // The 101 with the start of a frame in one packet, then the rest and more
+  // frames in separate packets sent back to back (the defect found in the
+  // review of gladys-isy: bytes behind the upgrade parsed after later ones).
+  const cert = selfSigned('pulse-hub');
+  const sockets = new Set();
+  const server = createTlsServer({ key: cert.key, cert: cert.cert }, (socket) => {
+    sockets.add(socket);
+    socket.on('error', () => {});
+    let head = '';
+    socket.on('data', (chunk) => {
+      head += chunk.toString('latin1');
+      const end = head.indexOf('\r\n\r\n');
+      if (end < 0 || socket.answered) return;
+      socket.answered = true;
+      const key = /sec-websocket-key: (.+)/i.exec(head)[1].trim();
+      const accept = createHash('sha1')
+        .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest('base64');
+      const frames = ['one', 'two', 'three', 'four'].map((text) => frame(text));
+      const first = frames[0];
+      socket.write(
+        Buffer.concat([
+          Buffer.from(
+            `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+          ),
+          first.subarray(0, 2),
+        ]),
+      );
+      socket.write(first.subarray(2));
+      for (const next of frames.slice(1)) {
+        socket.write(next.subarray(0, 1));
+        socket.write(next.subarray(1));
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    for (const s of sockets) s.destroy();
+    server.close();
+  });
+  const messages = [];
+  const closes = [];
+  const { connection } = await openHubSocket({
+    host: '127.0.0.1',
+    port: server.address().port,
+    path: '/rpc',
+    timeoutMs: 3000,
+    onMessage: (text) => messages.push(text),
+    onClose: (err) => closes.push(err),
+  });
+  await until(() => messages.length === 4);
+  assert.deepEqual(messages, ['one', 'two', 'three', 'four']);
+  assert.deepEqual(closes, []);
+  connection.close();
+});
 
 const until = async (check, ms = 3000) => {
   const end = Date.now() + ms;

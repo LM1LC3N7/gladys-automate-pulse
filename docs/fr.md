@@ -50,22 +50,32 @@ bouger.
 ## Comportement des commandes
 
 - Un mouvement part dans les 3,5 s qui suivent votre clic, sinon il est refusé
-  (rien n'est envoyé). Il est « accepté » dès que le hub indique que le store
-  bouge ou y est déjà ; si le hub ne le dit pas à temps, Gladys affiche
-  **« envoyée, sans confirmation »** et relit le store. La position n'est
-  confirmée que quand le hub la donne ; une position non atteinte à la fin
-  s'affiche sur le badge.
-- **Arrêt** n'attend jamais : il part tout de suite, même quand le hub a
-  demandé d'attendre (un seul essai), et annule un mouvement pas encore envoyé.
+  (rien n'est envoyé). Il est « accepté » seulement si le hub indique ensuite
+  un changement causé par l'ordre : un store immobile qui se met à bouger, une
+  position plus proche de celle demandée, ou cette position. Sinon (un store
+  qui bougeait déjà ne prouve rien), Gladys affiche **« envoyée, sans
+  confirmation »** et relit le store. La position n'est confirmée que quand le
+  hub la donne ; une position non atteinte à la fin s'affiche sur le badge.
+- **Arrêt** n'attend jamais une file ni une pause demandée par le hub. Sur une
+  connexion ouverte, il part tout de suite ; sans connexion, il en ouvre une
+  (un essai, au plus toutes les 5 s, dans ses 3,5 s). Il est refusé quand le
+  certificat du hub a changé. Il annule un mouvement pas encore envoyé, et
+  pendant une minute il est renvoyé tant que le hub montre le store en
+  mouvement (en premier sur la connexion suivante si la connexion est tombée).
 - La batterie et le type de moteur viennent rarement du hub : ils sont demandés
-  au plus une fois par heure et par store, la batterie peut donc apparaître un
-  peu plus tard.
+  au plus une fois par heure et par store, la batterie peut donc apparaître
+  après l'ajout du store : appuyez alors sur **Mettre à jour** sur ce store
+  dans l'onglet Découverte.
+- L'état de tous les stores est demandé au hub au plus une fois par seconde,
+  quel que soit le nombre de stores qu'une scène fait bouger.
 
 ## Limites
 
 - Un seul hub par intégration dans cette version.
 - Les noms des stores sont lus sur le second port du hub (TCP 1487) ; s'il ne
-  répond pas, un store est nommé d'après son identifiant (« Store ABC »).
+  répond pas, un store est nommé d'après son identifiant (« Store ABC »). Ce
+  port est en TCP simple, sans TLS ni contrôle du certificat : seuls les noms y
+  passent, jamais une commande.
 - Un hub qui refuse les connexions (HTTP 429 ou 5xx) est laissé tranquille de
   1 minute à 6 heures ; les autres échecs sont réessayés après 10 s, 30 s, 1, 2
   et 5 minutes, jamais plus vite que l'intervalle de lecture, redémarrage

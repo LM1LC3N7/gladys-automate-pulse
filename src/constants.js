@@ -101,4 +101,20 @@ export const TIMINGS = {
   namesTries: 3,
   /** A first click on "Trust the new certificate" waits this long for the second one. */
   trustClick: MINUTE,
+  /**
+   * One state request of the hub at a time (it covers every shade): another
+   * one within this gap waits for the answer (review I4).
+   */
+  askGap: SECOND,
+  /** A STOP not seen still is written again on the next reports for this long (review I2). */
+  stopHold: MINUTE,
+  /** At most this many STOPs written again for one click. */
+  stopReaffirmMax: 3,
+  /** A STOP (or its reaffirmation) opens at most one connection this often (review m8). */
+  stopConnectEvery: 5 * SECOND,
+  /** The Discovery tab is sent at most `discoveryBurst` times per `discoveryWindow` (review m4). */
+  discoveryBurst: 5,
+  discoveryWindow: 10 * SECOND,
+  /** Reports that arrive before the session is set (same TLS packet as the upgrade). */
+  earlyMessages: 4,
 };

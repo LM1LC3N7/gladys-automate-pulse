@@ -20,11 +20,23 @@ the notes of the version's GitHub Release.
   typed); another one stops everything until it is trusted (its fingerprint
   in the status, a "Trust the new certificate" button pressed twice).
 - Moves decided on the report of the hub, sent within 3.5 s or refused,
-  "sent, without confirmation" when the hub does not report them in time, a
-  position confirmed only by a report equal to it, the badge showing a
-  position not reached.
-- STOP at once, never queued, before the first report after a restart and
-  through a pause (one try); it cancels the moves not sent yet.
+  "accepted" only on a change the order caused (a shade already moving proves
+  nothing), else "sent, without confirmation"; a position confirmed only by a
+  report equal to it, the badge showing a position not reached; an empty or
+  unreadable position is unknown, never "open".
+- STOP never queued, before the first report after a restart and through a
+  pause (one connection try, at most every 5 s, within its own deadline); it
+  cancels the moves not sent yet, and is written again for a minute while the
+  hub still reports the shade moving, first thing on the next connection when
+  the connection dropped.
+- The identity of the hub kept once known: a report missing its MAC (or any
+  identity) is never taken as another hub; only a MAC (or hubId) that differs.
+- One state request of the hub at a time, at most one per second, for all the
+  shades; one schedule of follow-up reads for the hub after the last order; the
+  Discovery tab sent at most 5 times per 10 s.
+- A fingerprint typed and verified is kept in `/data`: emptying the field
+  never relearns the certificate blindly; a wrong fingerprint typed then
+  removed goes back to the pinned one.
 - A 429 or a 5xx pauses the connections (1 minute to 6 hours, kept in
   `/data`); never connected sooner than the read interval, a restart included.
 - A "Test the connection" button, English and French texts.

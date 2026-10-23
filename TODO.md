@@ -23,6 +23,13 @@ up to date at the end of every milestone.
       last try in /data, certificate change as a final stop with a two-press
       trust button, Test button, en/fr, docs, cover. Tested against a
       simulated hub on 127.0.0.1 only.
+- [x] **Milestone 1 fixes — review 1** (2026-10-23): identity kept unless
+      proven different (B1), acceptance only on a change the order caused
+      (I1), STOP held and written again, first on the next session, session
+      reopened at once after a drop (I2), blank `mp` unknown (I3), one shared
+      state request and one follow-up schedule for the hub (I4), typed
+      fingerprint kept in /data (I5), m1-m8, burst test of the frames right
+      behind the upgrade.
 - [ ] **Milestone 2 — real hub**: run against a real Pulse Hub v2 (and a Pulse
       Pro Hub) and compare with the app (see "To check"); turn the answers
       (anonymized) into fixtures.
@@ -99,5 +106,45 @@ up to date at the end of every milestone.
   intervals, 30 s at least) is dropped.
 - **Names** on TCP 1487, one short read-only exchange (8 KB, 4 s), at most
   three tries per shade spaced 10 min; a shade is published once its name was
-  asked (fallback "Store/Shade <id>").
+  asked (fallback "Store/Shade <id>"). Port 1487 is plain TCP, not tied to the
+  pin: names only, cleaned and bounded (said in the docs).
 - **One hub** per integration in v1.
+
+### Decisions of review 1
+
+- **Identity (B1)**: the identity (MAC, else `id-<hubId>`) is set at the first
+  report and frozen (never downgraded nor upgraded: it fixes the external
+  ids). The facts read (`hubMac`, `hubId`) are merged into /data while
+  nothing contradicts them (written only when they change). Another hub only
+  on a fact of the same nature that differs (the MAC when both reports have
+  one, else the hubId). A report with no fact at all neither proves another
+  hub nor lifts the check of a session not verified yet. STOP is refused
+  only on a proven other hub. The shades are kept across sessions of the same
+  hub (motor type, names, review m3).
+- **Acceptance (I1)**: on a report after the write: the position asked; or a
+  shade still in the last report before the write now moving; or a moving
+  shade whose position got closer to the one asked by more than 2 %. The
+  app can only judge on what it read: a shade still in its last report and
+  moving afterwards is taken as the order's doing.
+- **STOP held (I2)**: once written, held 60 s: written again on a later
+  report that still shows the shade moving (3 times at most), first thing on
+  a new session; a session lost while a STOP is held is reopened at once (one
+  try, at most every 5 s, outside the backoff). Lifted by a report showing
+  the shade still, or by a newer move really written (never by one refused or
+  not sent). A move written before a STOP keeps no target (m2).
+- **Rhythm (I4)**: one state request in flight, another within 1 s waits for
+  its answer (merged); one follow-up schedule for the hub, set again on the
+  last order; the Discovery tab at most 5 times per 10 s (m4), the rest sent
+  later in one go (a scan or a reconnection to Gladys always goes).
+- **Pin (I5, m7)**: the fingerprint of every verified connection is kept in
+  /data (learned or typed). A certificate change whose fingerprint is the one
+  pinned is lifted when the typed field is emptied.
+- **STOP connection (m1, m8)**: waited for within the STOP's own deadline
+  (3.3 s, real time), whatever connection is under way; a failed connection
+  never waits for its publication to Gladys; at most one STOP connection try
+  every 5 s.
+- **Frames behind the upgrade**: parsed synchronously in the same data event
+  as the end of the upgrade answer (never deferred); tested with the upgrade
+  and four frames split into back-to-back packets (the test fails when the
+  parse is deferred). Reports that arrive before the session is set (same
+  packet) are kept (4 at most) and applied once it is.

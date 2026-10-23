@@ -12,7 +12,9 @@
 //   - `certChanged`: another certificate met (its fingerprint): a final stop,
 //     lifted only by the user (that fingerprint typed, or the button pressed
 //     twice);
-//   - `hub`: the identity (MAC) of the hub met behind that certificate.
+//   - `hub`: the identity of the hub met behind that certificate (frozen: the
+//     external ids; never downgraded), and the facts read from it (`hubMac`,
+//     `hubId`), merged while nothing contradicts them.
 // Nothing secret: the hub has no password. Readable by the container user
 // only (0600).
 // -----------------------------------------------------------------------------
@@ -96,5 +98,11 @@ export function normalizeMemory(raw, now) {
       typeof data.hub === 'string' && /^([0-9a-f]{12}|id-[a-z0-9_-]{1,32})$/.test(data.hub)
         ? data.hub
         : null,
+    // The identity facts read from that hub (review B1): compared by nature,
+    // a missing one proves nothing.
+    hubMac:
+      typeof data.hubMac === 'string' && /^[0-9a-f]{12}$/.test(data.hubMac) ? data.hubMac : null,
+    hubId:
+      typeof data.hubId === 'string' && /^[a-z0-9_-]{1,32}$/.test(data.hubId) ? data.hubId : null,
   };
 }

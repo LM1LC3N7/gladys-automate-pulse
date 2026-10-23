@@ -48,20 +48,31 @@ A shade is never a switch: a "turn everything off" never moves it.
 ## How the commands behave
 
 - A move is sent within 3.5 s of your click or refused (nothing sent). It is
-  "accepted" once the hub reports the shade moving or already there; if the
-  hub does not report it in time, Gladys says **"sent, without confirmation"**
-  and reads the shade again. The position is confirmed only when the hub
-  reports it; a position not reached at the end shows on the badge.
-- **Stop** never waits: it goes at once, even while the hub asked to wait (one
-  try), and cancels a move not sent yet.
+  "accepted" only when the hub then reports a change the order caused: the
+  shade still before and now moving, a position closer to the one asked, or
+  that position. Otherwise (a shade that was already moving proves nothing),
+  Gladys says **"sent, without confirmation"** and reads the shade again. The
+  position is confirmed only when the hub reports it; a position not reached
+  at the end shows on the badge.
+- **Stop** never waits for a queue nor for a pause asked by the hub. On an
+  open connection it goes at once; without one, it opens one (one try, at
+  most every 5 s, within its 3.5 s). It is refused when the certificate of
+  the hub changed. It cancels a move not sent yet, and for a minute it is
+  sent again while the hub still reports the shade moving (also first thing
+  on the next connection if the connection dropped).
 - The battery and the motor type come from the hub rarely: they are asked for
-  at most once an hour per shade, so the battery may appear a little later.
+  at most once an hour per shade, so the battery may appear after you added
+  the shade: then press **Update** on it in the Discovery tab.
+- The state of all the shades is asked from the hub at most once a second,
+  however many shades a scene moves.
 
 ## Limits
 
 - One hub per integration in this version.
 - The names of the shades are read on the second port of the hub (TCP 1487);
-  if it does not answer, a shade is named after its id ("Shade ABC").
+  if it does not answer, a shade is named after its id ("Shade ABC"). That
+  port is plain TCP, without TLS nor the certificate check: only the names go
+  through it, never a command.
 - A hub that refuses connections (HTTP 429 or 5xx) is left alone 1 minute to
   6 hours; other failures are retried after 10 s, 30 s, 1, 2 and 5 minutes,
   never sooner than the read interval, a restart included.

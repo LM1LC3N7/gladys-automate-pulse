@@ -140,11 +140,31 @@ export function hubIdentityOf(reported) {
   if (mac) {
     return mac;
   }
-  const id = own(reported, 'hubId');
-  if (typeof id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(id)) {
-    return `id-${id.toLowerCase()}`;
+  const id = hubIdOf(own(reported, 'hubId'));
+  return id ? `id-${id}` : undefined;
+}
+
+/** The hubId when it is plain (letters, digits, '-', '_', 32 at most), lower case. */
+export function hubIdOf(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+/**
+ * Whether two sets of identity facts `{ mac, hubId }` PROVE two different
+ * hubs: only facts of the same nature that differ (the MAC first; the hubId
+ * only when one MAC is missing). A missing or unreadable fact proves nothing
+ * (review B1: a value that cannot be read is not "another device").
+ */
+export function provenOther(known, read) {
+  if (known.mac && read.mac) {
+    return known.mac !== read.mac;
   }
-  return undefined;
+  if (known.hubId && read.hubId) {
+    return known.hubId !== read.hubId;
+  }
+  return false;
 }
 
 /** "12.1D07" -> { voltage: 12.1, type: 'D', version: '07' }, or undefined. */
@@ -180,9 +200,18 @@ export function batteryPercent(type, voltage) {
 
 export const hasBattery = (type) => BATTERY_TYPES.has(type);
 
-/** A percent closed read from the hub: an integer 0..100, or undefined. */
-function closedOf(value) {
-  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+/**
+ * A percent closed read from the hub: an integer 0..100, or undefined. Only a
+ * number or a string of digits: '' or ' ' are unknown (Number('') is 0, which
+ * would read "fully open" and could confirm an "open" — review I3).
+ */
+export function closedOf(value) {
+  let n = NaN;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string' && /^\d{1,3}$/.test(value)) {
+    n = Number(value);
+  }
   if (!Number.isFinite(n) || n < 0 || n > 100) {
     return undefined;
   }
@@ -236,6 +265,8 @@ export function reportOf(message) {
   return {
     name: cleanText(own(reported, 'name'), LIMITS.name),
     identity: hubIdentityOf(reported),
+    mac: macOf(own(reported, 'mac')),
+    hubId: hubIdOf(own(reported, 'hubId')),
     model,
     firmware: cleanText(own(own(reported, 'firmware'), 'version'), 32),
     shades,
