@@ -55,6 +55,10 @@ up to date at the end of every milestone.
   battery motors (the percent is aiopulse2's estimate).
 - Port 1487: still open on recent firmware? The answer format of the names.
 - HTTP 429/5xx on the upgrade: never seen; handled as a pause anyway.
+- How long a shade is still reported moving right after a STOP (deceleration):
+  the 3 rewrites of a held STOP may be spent within the first ~4 s (4 STOPs in
+  all, accepted for now, review 2 r3); space them in time if a real hub shows
+  it.
 
 ## Decisions
 

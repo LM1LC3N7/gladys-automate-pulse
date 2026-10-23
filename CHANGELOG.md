@@ -10,6 +10,13 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+### Fixed
+
+- A STOP held after a click is no longer written again after a newer move (a
+  report arriving while the move was being written could stop it).
+- A dropped connection is no longer reopened at once for a STOP whose
+  rewrites are all spent.
+
 ## [0.1.1] - 2026-10-23
 
 ### Added

@@ -658,3 +658,55 @@ test('I2: a STOP is written again while the next reports show the shade moving, 
   app.ask(app.session.epoch);
   await until(() => !app.stopHolds.has('ABC'));
 });
+
+test('review 2 r1: a held STOP is never written after a newer move', async (t) => {
+  const { gladys, app, hub, clock, fire, timeouts } = await setup(t);
+  await createAll(gladys);
+  const s = deaf(hub.shades.ABC, { is: false, mp: 40 });
+  s.deaf = true;
+  const stop = press(gladys, 'ABC', 'state', 0).catch(() => {});
+  await until(() => timeouts.some((x) => x.ms === TIMINGS.commandAnswerBy && !x.cleared));
+  fire(TIMINGS.commandAnswerBy);
+  await stop;
+  assert.ok(app.stopHolds.has('ABC'));
+  // A "moving" report handled between the write of the move and its callback.
+  const conn = app.session.conn;
+  const send = conn.send.bind(conn);
+  const moving = JSON.stringify({
+    result: {
+      reported: { mac: 'aa:bb:cc:00:11:22', shades: { ABC: { mp: 40, is: false, ol: true } } },
+    },
+  });
+  conn.send = (text) => {
+    const result = send(text);
+    if (text.includes('movePercent')) {
+      app.onMessage(app.session.epoch, moving);
+    }
+    return result;
+  };
+  s.deaf = false;
+  clock.advance(TIMINGS.askGap);
+  const move = press(gladys, 'ABC', 'position', 100).catch(() => {});
+  await until(() => orders(hub).some((o) => o.ABC?.movePercent === 0));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  fire(TIMINGS.commandAnswerBy);
+  await move;
+  const kinds = orders(hub).map((o) => Object.keys(o.ABC)[0]);
+  assert.equal(kinds.at(-1), 'movePercent', `orders: ${kinds.join(', ')}`);
+  assert.equal(app.stopHolds.has('ABC'), false);
+});
+
+test('review 2 r2: a hold whose rewrites are spent never reopens a dropped session', async (t) => {
+  const { gladys, app, hub, clock } = await setup(t);
+  await createAll(gladys);
+  app.stopHolds.set('ABC', {
+    until: clock.now() + TIMINGS.stopHold,
+    count: TIMINGS.stopReaffirmMax,
+    seq: app.reportSeq,
+  });
+  const connections = hub.connections;
+  hub.dropAll();
+  await until(() => !app.session);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(hub.connections, connections);
+});

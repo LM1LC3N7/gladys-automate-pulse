@@ -147,6 +147,8 @@ export class PulseApp {
     /** Orders numbered as they are written; shade id -> number of its last STOP written. */
     this.writeSeq = 0;
     this.lastStopWrite = new Map();
+    /** shade id -> number of its last move written. */
+    this.lastMoveWrite = new Map();
     /** shade id -> { until, count, seq }: a STOP to write again while the shade moves. */
     this.stopHolds = new Map();
     this.stopConnectAt = -Infinity;
@@ -539,9 +541,10 @@ export class PulseApp {
     this.logger.warn(`Hub: ${reasonOf(this.lastError).en}; next try in ${age(wait)}`);
     this.wake();
     this.badges = undefined;
-    if (this.heldStops() && this.stopConnectAllowed()) {
+    if (this.stopsToReaffirm() && this.stopConnectAllowed()) {
       // A STOP may have died with the session: reopened at once, one try,
-      // outside the backoff (review I2).
+      // outside the backoff (review I2); never for a hold whose rewrites are
+      // spent (review 2, r2: a hub that accepts then drops is not hammered).
       this.stopConnectAt = this.now();
       this.connect().catch(() => {});
     }
@@ -776,6 +779,14 @@ export class PulseApp {
     return this.stopHolds.size > 0;
   }
 
+  /** Whether a STOP held may still be written again. */
+  stopsToReaffirm() {
+    return (
+      this.heldStops() &&
+      [...this.stopHolds.values()].some((hold) => hold.count < TIMINGS.stopReaffirmMax)
+    );
+  }
+
   stopConnectAllowed() {
     return this.now() - this.stopConnectAt >= TIMINGS.stopConnectEvery;
   }
@@ -810,6 +821,11 @@ export class PulseApp {
   writeStop(id, hold) {
     const session = this.session;
     if (!session?.conn.open) {
+      return;
+    }
+    if ((this.lastMoveWrite.get(id) ?? 0) > (this.lastStopWrite.get(id) ?? 0)) {
+      // A newer move was written after the STOP held: the user wants it (review 2, r1).
+      this.stopHolds.delete(id);
       return;
     }
     hold.count += 1;
@@ -1340,6 +1356,11 @@ export class PulseApp {
       const before = { moving: shadeBefore.moving, closed: shadeBefore.closed };
       this.writeSeq += 1;
       const written = this.writeSeq;
+      // Lifted BEFORE the write (synchronous, after check()): a report handled
+      // between the write and its callback never writes the held STOP after
+      // this newer move (review 2, r1).
+      this.lastMoveWrite.set(target.shade, written);
+      this.stopHolds.delete(target.shade);
       const result = await session.conn.send(movePayload(target.shade, plan.closed, this.now()));
       const name = `Shade ${target.shade}: ${100 - plan.closed} % open`;
       if (result === 'closed') {
@@ -1349,7 +1370,6 @@ export class PulseApp {
       // Really written: a newer move than any STOP held, which it lifts.
       const stoppedAfter = (this.lastStopWrite.get(target.shade) ?? 0) > written;
       if (!stoppedAfter) {
-        this.stopHolds.delete(target.shade);
         this.targets.set(target.shade, plan.closed);
         this.notReached.delete(target.shade);
       }
