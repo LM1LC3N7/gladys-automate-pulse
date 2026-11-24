@@ -8,8 +8,8 @@ contributors.
 A Gladys Assistant **external integration**: a Node.js service (Node 22+, ESM,
 no build step) that runs in its own sandboxed Docker container and talks to
 Gladys through
-[`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js),
-its only runtime dependency. It started from the official JavaScript template.
+[`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js)
+(v0.16), its only runtime dependency. It started from the official JavaScript template.
 It bridges Rollease Acmeda Automate shades through the Pulse Hub v2 and its
 local WebSocket (logic ported from aiopulse2, Apache-2.0).
 
@@ -17,7 +17,7 @@ local WebSocket (logic ported from aiopulse2, Apache-2.0).
 
 ```bash
 npm install
-npm test                                  # node --test, the built-in runner
+npm test                                  # node --test --test-timeout=60000
 node --test test/app.test.js              # one file
 node --test --test-name-pattern "STOP"    # tests whose name matches
 npm run lint                              # ESLint
@@ -74,6 +74,11 @@ test/                             node --test, against the SDK's fake Gladys and
 
 ## Rules
 
+- **Features follow the core model.** Every feature has a numeric `min` and
+  `max`, `read_only` and `has_feedback`: Gladys answers HTTP 422 otherwise
+  (`test/helpers/coreFeature.js` checks every shade kind). Devices carry
+  `should_poll: false` (Gladys 5.3 polls a device with `poll_frequency` unless
+  it says so).
 - **External ids are forever.** `gladys.externalIds('shade', '<hub>-<shade>')`
   (see src/devices.js). The same goes for every key users store: manifest
   `config_schema`, `actions`, feature keys.

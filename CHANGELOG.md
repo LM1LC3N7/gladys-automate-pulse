@@ -10,6 +10,10 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+### Changed
+
+- Integration SDK 0.16 (no change for the shades).
+
 ## [0.1.2] - 2026-10-23
 
 ### Fixed

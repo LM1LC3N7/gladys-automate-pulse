@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
 import { normalizeConfig, normalizeFingerprint, parseHost } from '../src/config.js';
 import { buildDevice, numberIn, parseExternalId } from '../src/devices.js';
+import { assertCoreDevice } from './helpers/coreFeature.js';
 import {
   askNames,
   batteryPercent,
@@ -21,6 +22,7 @@ import {
   voltageOf,
   closedOf,
   provenOther,
+  TYPES,
 } from '../src/pulse/protocol.js';
 
 test('a position: a number or digits only; blank is unknown, never 0 (review I3)', () => {
@@ -147,6 +149,23 @@ test('the configuration', () => {
   assert.equal(config.pollInterval, 5);
   assert.equal(normalizeConfig({ certificate_fingerprint: 'nope' }).pinInvalid, true);
   assert.equal(normalizeConfig({ poll_interval: '' }).pollInterval, 10);
+});
+
+test('every feature of every shade kind has a numeric min and max and the other core fields', () => {
+  const gladys = createFakeGladys({ selector: 'automate-pulse' });
+  let features = 0;
+  let battery = 0;
+  for (const type of [...Object.keys(TYPES), undefined, 'Z']) {
+    for (const language of ['en', 'fr']) {
+      const shade = { id: 'ABC', name: type ? '' : 'Salon', type };
+      const device = buildDevice(gladys, 'aabbcc001122', shade, { language, model: 'Pulse 2' });
+      features += assertCoreDevice(device, `type ${type} ${language}`);
+      battery += device.features.length === 3 ? 1 : 0;
+    }
+  }
+  // 8 motor types + none + unknown, 2 languages: state and position each, battery on D, U, d.
+  assert.equal(battery, 3 * 2);
+  assert.equal(features, 10 * 2 * 2 + battery);
 });
 
 test('devices: shutter, never a switch; ids round trip', () => {
