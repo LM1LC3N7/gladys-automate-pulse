@@ -160,3 +160,7 @@ up to date at the end of every milestone.
   and four frames split into back-to-back packets (the test fails when the
   parse is deferred). Reports that arrive before the session is set (same
   packet) are kept (4 at most) and applied once it is.
+
+## Next patch
+
+- Migration review minors: see `_lots/migration-reviews/w9-gladys-automate-pulse-r1.md`.
