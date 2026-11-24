@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-24
+
 ### Changed
 
 - Integration SDK 0.16 (no change for the shades).
@@ -56,6 +58,7 @@ the notes of the version's GitHub Release.
   `/data`); never connected sooner than the read interval, a restart included.
 - A "Test the connection" button, English and French texts.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/LM1LC3N7/gladys-automate-pulse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/LM1LC3N7/gladys-automate-pulse/releases/tag/v0.1.1
